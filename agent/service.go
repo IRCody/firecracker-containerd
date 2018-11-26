@@ -15,22 +15,28 @@ package main
 
 import (
 	"context"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"syscall"
 
+	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/runtime/v2/shim"
 	shimapi "github.com/containerd/containerd/runtime/v2/task"
+	"github.com/containerd/fifo"
 	"github.com/firecracker-microvm/firecracker-containerd/proto"
 	"github.com/gogo/protobuf/types"
+	"github.com/mdlayher/vsock"
 	"github.com/sirupsen/logrus"
 )
 
 const (
 	defaultNamespace = "default"
 	bundleMountPath  = "/container"
+	defaultStdioPath = "/container"
 )
 
 // TaskService represents inner shim wrapper over runc in order to:
@@ -38,7 +44,9 @@ const (
 // - Add debug logging to simplify debugging
 // - Make place for future extensions as needed
 type TaskService struct {
-	runc shim.Shim
+	runc  shim.Shim
+	io    *cio.FIFOSet
+	ioCtx context.Context
 }
 
 func NewTaskService(runc shim.Shim) shim.Shim {
@@ -59,10 +67,15 @@ func (ts *TaskService) Create(ctx context.Context, req *shimapi.CreateTaskReques
 
 	// Do not pass any mounts to runc, everything is already mounted for us
 	req.Rootfs = nil
-	// TODO: handle stdio see: https://github.com/firecracker-microvm/firecracker-containerd/issues/17
-	req.Stdin = ""
-	req.Stdout = ""
-	req.Stderr = ""
+	// TODO: handle stdio
+	ts.io, err = cio.NewFIFOSetInDir(defaultStdioPath, req.ID, req.Terminal)
+	if err != nil {
+		return nil, err
+	}
+	req.Stdin = ts.io.Stdin
+	req.Stdout = ts.io.Stdout
+	req.Stderr = ts.io.Stderr
+	go ts.proxyStdio()
 
 	ctx = namespaces.WithNamespace(ctx, defaultNamespace)
 	// before create call ensure we remove any existing .init.pid file
@@ -77,6 +90,44 @@ func (ts *TaskService) Create(ctx context.Context, req *shimapi.CreateTaskReques
 
 	log.G(ctx).WithField("pid", resp.Pid).Debugf("create succeeded")
 	return resp, nil
+}
+
+func (ts *TaskService) proxyStdio() error {
+	// proxy stdout
+	var stdout io.ReadWriteCloser
+	var err error
+	stdoutPath := ts.io.Stdout
+	if stdoutPath != "" {
+		if stdout, err = fifo.OpenFifo(context.TODO(), stdoutPath, syscall.O_RDONLY|syscall.O_CREAT|syscall.O_NONBLOCK, 0700); err != nil {
+			return err
+		}
+	}
+	// Setup the vsock connection, once received start reading and writing to stream
+
+	go func() {
+		listener, err := vsock.Listen(11001)
+		if err != nil {
+			log.G(context.TODO()).WithError(err).Error("unable to listen on vsock")
+			return
+		}
+		conn, err := listener.Accept()
+		if err != nil {
+			log.G(context.TODO()).WithError(err).Error("unable to accept vsock connection")
+			return
+		}
+
+		buf := make([]byte, 1024)
+		for {
+			read, _ := stdout.Read(buf)
+			_, err := conn.Write(buf[:read])
+			if err != nil {
+				log.G(context.TODO()).WithError(err).Error("error writing to vsock")
+				continue
+			}
+
+		}
+	}()
+	return nil
 }
 
 func unpackBundle(path string, bundle *types.Any) (*types.Any, error) {
