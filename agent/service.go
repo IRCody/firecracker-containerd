@@ -36,7 +36,7 @@ import (
 const (
 	defaultNamespace = "default"
 	bundleMountPath  = "/container"
-	defaultStdioPath = "/container"
+	defaultStdioPath = "/container/fifo"
 )
 
 // TaskService represents inner shim wrapper over runc in order to:
@@ -73,14 +73,35 @@ func (ts *TaskService) Create(ctx context.Context, req *shimapi.CreateTaskReques
 		return nil, err
 	}
 	req.Stdin = ts.io.Stdin
-	req.Stdout = ts.io.Stdout
 	req.Stderr = ts.io.Stderr
-	go ts.proxyStdio()
+	req.Stdout = ts.io.Stdout
+	var stdin io.ReadWriteCloser
+	if ts.io.Stdin != "" {
+		if stdin, err = fifo.OpenFifo(context.TODO(), ts.io.Stdin, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_NONBLOCK, 0700); err != nil {
+			return nil, err
+		}
+	}
+	var stdout io.ReadWriteCloser
+	if ts.io.Stdout != "" {
+		if stdout, err = fifo.OpenFifo(context.TODO(), ts.io.Stdout, syscall.O_RDONLY|syscall.O_CREAT|syscall.O_NONBLOCK, 0700); err != nil {
+			return nil, err
+		}
+	}
+	var stderr io.ReadWriteCloser
+	if ts.io.Stderr != "" {
+		if stderr, err = fifo.OpenFifo(context.TODO(), ts.io.Stderr, syscall.O_RDONLY|syscall.O_CREAT|syscall.O_NONBLOCK, 0700); err != nil {
+			return nil, err
+		}
+	}
 
+	log.G(ctx).WithField("path", ts.io.Stdout).Info("Opened stdout fifo")
+	ts.proxyStdio(stdin, stdout, stderr)
+	log.G(ctx).WithError(err).Error("proxyStdio")
 	ctx = namespaces.WithNamespace(ctx, defaultNamespace)
 	// before create call ensure we remove any existing .init.pid file
 	// We can ignore errors since it's valid for the file to not be present
 	os.Remove(".init.pid")
+	log.G(ctx).Debug("Calling runc create")
 	resp, err := ts.runc.Create(ctx, req)
 
 	if err != nil {
@@ -92,25 +113,18 @@ func (ts *TaskService) Create(ctx context.Context, req *shimapi.CreateTaskReques
 	return resp, nil
 }
 
-func (ts *TaskService) proxyStdio() error {
-	// proxy stdout
-	var stdout io.ReadWriteCloser
-	var err error
-	stdoutPath := ts.io.Stdout
-	if stdoutPath != "" {
-		if stdout, err = fifo.OpenFifo(context.TODO(), stdoutPath, syscall.O_RDONLY|syscall.O_CREAT|syscall.O_NONBLOCK, 0700); err != nil {
-			return err
-		}
-	}
+func (ts *TaskService) proxyStdio(stdin, stdout, stderr io.ReadWriteCloser) error {
 	// Setup the vsock connection, once received start reading and writing to stream
 
 	go func() {
 		listener, err := vsock.Listen(11001)
+		log.G(context.TODO()).Debug("Created listener")
 		if err != nil {
 			log.G(context.TODO()).WithError(err).Error("unable to listen on vsock")
 			return
 		}
 		conn, err := listener.Accept()
+		log.G(context.TODO()).Debug("Accepted connection")
 		if err != nil {
 			log.G(context.TODO()).WithError(err).Error("unable to accept vsock connection")
 			return
@@ -124,7 +138,6 @@ func (ts *TaskService) proxyStdio() error {
 				log.G(context.TODO()).WithError(err).Error("error writing to vsock")
 				continue
 			}
-
 		}
 	}()
 	return nil

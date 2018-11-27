@@ -34,6 +34,7 @@ import (
 	"github.com/containerd/containerd/runtime"
 	"github.com/containerd/containerd/runtime/v2/shim"
 	taskAPI "github.com/containerd/containerd/runtime/v2/task"
+	"github.com/containerd/fifo"
 	"github.com/containerd/ttrpc"
 	"github.com/firecracker-microvm/firecracker-containerd/internal"
 	"github.com/firecracker-microvm/firecracker-containerd/proto"
@@ -61,6 +62,8 @@ type service struct {
 	agentClient  taskAPI.TaskService
 	config       *Config
 	machine      *firecracker.Machine
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 var _ = (taskAPI.TaskService)(&service{})
@@ -185,6 +188,8 @@ func (s *service) Create(ctx context.Context, request *taskAPI.CreateTaskRequest
 		log.G(ctx).WithError(err).Error("create failed")
 		return nil, err
 	}
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	go s.proxyStdio(s.ctx, request.Stdin, request.Stdout, request.Stderr, defaultCID)
 	log.G(ctx).Infof("successfully created task with pid %d", resp.Pid)
 	return resp, nil
 }
@@ -200,7 +205,6 @@ func (s *service) Start(ctx context.Context, req *taskAPI.StartRequest) (*taskAP
 
 	return resp, nil
 }
-
 func (s *service) monitorState(ctx context.Context, id, exec_id string, pid uint32) {
 	ticker := time.NewTicker(time.Second)
 	for {
@@ -233,6 +237,70 @@ func (s *service) monitorState(ctx context.Context, id, exec_id string, pid uint
 			}
 		}
 
+	}
+}
+
+func (s *service) proxyStdio(ctx context.Context, stdin, stdout, stderr string, CID uint32) {
+	go proxyIn(ctx, stdin, CID, 11001)
+	go proxyOut(ctx, stdout, CID, 11001)
+	go proxyOut(ctx, stderr, CID, 11002)
+}
+
+func proxyIn(ctx context.Context, path string, CID, port uint32) {
+	if path != "" {
+		reader, err := fifo.OpenFifo(ctx, path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0700)
+		if err != nil {
+			log.G(ctx).WithError(err).Error("error opening fifo")
+			return
+		}
+		// Dial a connection to vsock on well known port 11001
+		conn, err := vsock.Dial(CID, port)
+		if err != nil {
+			log.G(ctx).WithError(err).Error("unable to dial agent vsock")
+		}
+		buf := make([]byte, 1024)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				n, err := reader.Read(buf)
+				n, _ = conn.Write(buf[:n])
+				if err != nil {
+					log.G(ctx).WithError(err).Error("Error reading from fifo")
+				}
+				time.Sleep(time.Second)
+			}
+		}
+	}
+}
+
+func proxyOut(ctx context.Context, path string, CID, port uint32) {
+	if path != "" {
+		writer, err := fifo.OpenFifo(ctx, path, syscall.O_WRONLY|syscall.O_NONBLOCK, 0700)
+		if err != nil {
+			log.G(ctx).WithError(err).Error("error opening fifo")
+			return
+		}
+		// Dial a connection to vsock on well known port 11001
+		conn, err := vsock.Dial(CID, port)
+		if err != nil {
+			log.G(ctx).WithError(err).Error("unable to dial agent vsock")
+		}
+		buf := make([]byte, 1024)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				n, err := conn.Read(buf)
+				n, _ = writer.Write(buf[:n])
+				if err != nil {
+					log.G(ctx).WithError(err).Error("Error reading from conn")
+				}
+				time.Sleep(time.Second)
+			}
+		}
 	}
 }
 
@@ -317,6 +385,7 @@ func (s *service) Kill(ctx context.Context, req *taskAPI.KillRequest) (*ptypes.E
 	if err != nil {
 		return nil, err
 	}
+	s.cancel()
 	return resp, nil
 }
 
