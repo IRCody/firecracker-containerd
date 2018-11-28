@@ -27,6 +27,7 @@ import (
 	"github.com/containerd/containerd/runtime/v2/shim"
 	shimapi "github.com/containerd/containerd/runtime/v2/task"
 	"github.com/containerd/fifo"
+	"github.com/firecracker-microvm/firecracker-containerd/internal"
 	"github.com/firecracker-microvm/firecracker-containerd/proto"
 	"github.com/gogo/protobuf/types"
 	"github.com/mdlayher/vsock"
@@ -115,9 +116,8 @@ func (ts *TaskService) Create(ctx context.Context, req *shimapi.CreateTaskReques
 
 func (ts *TaskService) proxyStdio(stdin, stdout, stderr io.ReadWriteCloser) error {
 	// Setup the vsock connection, once received start reading and writing to stream
-
-	go func() {
-		listener, err := vsock.Listen(11001)
+	out := func(reader io.ReadWriteCloser, port uint32) {
+		listener, err := vsock.Listen(port)
 		log.G(context.TODO()).Debug("Created listener")
 		if err != nil {
 			log.G(context.TODO()).WithError(err).Error("unable to listen on vsock")
@@ -132,14 +132,42 @@ func (ts *TaskService) proxyStdio(stdin, stdout, stderr io.ReadWriteCloser) erro
 
 		buf := make([]byte, 1024)
 		for {
-			read, _ := stdout.Read(buf)
+			read, _ := reader.Read(buf)
 			_, err := conn.Write(buf[:read])
 			if err != nil {
 				log.G(context.TODO()).WithError(err).Error("error writing to vsock")
 				continue
 			}
 		}
-	}()
+	}
+	in := func(writer io.ReadWriteCloser, port uint32) {
+		listener, err := vsock.Listen(port)
+		log.G(context.TODO()).Debug("Created listener")
+		if err != nil {
+			log.G(context.TODO()).WithError(err).Error("unable to listen on vsock")
+			return
+		}
+		conn, err := listener.Accept()
+		log.G(context.TODO()).Debug("Accepted connection")
+		if err != nil {
+			log.G(context.TODO()).WithError(err).Error("unable to accept vsock connection")
+			return
+		}
+
+		buf := make([]byte, 1024)
+		for {
+			n, err := conn.Read(buf)
+			_, err = writer.Write(buf[:n])
+			if err != nil {
+				log.G(context.TODO()).WithError(err).Error("error writing to fifo")
+				continue
+			}
+		}
+
+	}
+	go in(stdin, internal.StdinPort)
+	go out(stdout, internal.StdoutPort)
+	go out(stderr, internal.StderrPort)
 	return nil
 }
 

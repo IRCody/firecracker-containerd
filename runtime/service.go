@@ -241,9 +241,9 @@ func (s *service) monitorState(ctx context.Context, id, exec_id string, pid uint
 }
 
 func (s *service) proxyStdio(ctx context.Context, stdin, stdout, stderr string, CID uint32) {
-	go proxyIn(ctx, stdin, CID, 11001)
-	go proxyOut(ctx, stdout, CID, 11001)
-	go proxyOut(ctx, stderr, CID, 11002)
+	go proxyIn(ctx, stdin, CID, internal.StdinPort)
+	go proxyOut(ctx, stdout, CID, internal.StdoutPort)
+	go proxyOut(ctx, stderr, CID, internal.StderrPort)
 }
 
 func proxyIn(ctx context.Context, path string, CID, port uint32) {
@@ -269,7 +269,6 @@ func proxyIn(ctx context.Context, path string, CID, port uint32) {
 				if err != nil {
 					log.G(ctx).WithError(err).Error("Error reading from fifo")
 				}
-				time.Sleep(time.Second)
 			}
 		}
 	}
@@ -282,7 +281,6 @@ func proxyOut(ctx context.Context, path string, CID, port uint32) {
 			log.G(ctx).WithError(err).Error("error opening fifo")
 			return
 		}
-		// Dial a connection to vsock on well known port 11001
 		conn, err := vsock.Dial(CID, port)
 		if err != nil {
 			log.G(ctx).WithError(err).Error("unable to dial agent vsock")
@@ -298,7 +296,6 @@ func proxyOut(ctx context.Context, path string, CID, port uint32) {
 				if err != nil {
 					log.G(ctx).WithError(err).Error("Error reading from conn")
 				}
-				time.Sleep(time.Second)
 			}
 		}
 	}

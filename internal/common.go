@@ -16,4 +16,9 @@ package internal
 const (
 	SnapshotterMountType = "firecracker-snapshotter"
 	SnapshotterImageKey  = "firecracker-image"
+
+	// vsock ports to use for stdio
+	StdinPort  = 11000
+	StdoutPort = 11001
+	StderrPort = 11002
 )
