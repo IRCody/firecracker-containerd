@@ -23,6 +23,10 @@ proto: $(PROTO_GEN_SRC)
 	PROTOPATH=$(CURDIR) $(MAKE) -C service/fccontrol proto
 	PROTOPATH=$(CURDIR) $(MAKE) -C service/drivemount proto
 
+proto-docker:
+	docker run \
+		-v $(CURDIR):/protobuf \
+		localhost/proto-builder
 clean:
 	- rm -f $(PROTO_GEN_SRC)
 	- $(MAKE) -C service/fccontrol clean

@@ -45,7 +45,7 @@ $(SUBDIRS):
 	$(MAKE) -C $@
 
 proto:
-	PATH=$(BINPATH):$(PATH) $(MAKE) -C proto/ proto
+	PATH=$(BINPATH):$(PATH) $(MAKE) -C proto/ proto-docker
 
 clean:
 	for d in $(SUBDIRS); do $(MAKE) -C $$d clean; done
@@ -78,6 +78,11 @@ deps:
 	GOBIN=$(BINPATH) GO111MODULE=off go get -u github.com/containerd/ttrpc/cmd/protoc-gen-gogottrpc
 	GOBIN=$(BINPATH) GO111MODULE=off go get -u github.com/gogo/protobuf/protoc-gen-gogo
 
+	DOCKER_BUILDKIT=1 docker build \
+		--progress=plain \
+		--file tools/docker/Dockerfile.proto-builder \
+		--tag localhost/firecracker-containerd-proto-builder:${DOCKER_IMAGE_TAG} \
+		$(CURDIR)/tools/docker
 install:
 	for d in $(SUBDIRS); do $(MAKE) -C $$d install; done
 
