@@ -102,3 +102,12 @@ steps:
     command:
       - make -C examples integ-test TEST_SS=devmapper TEST_POOL=build_${BUILDKITE_BUILD_NUMBER}_example
     timeout_in_minutes: 10
+
+  - label: "protobuf compile validation"
+    agents:
+      queue: "${BUILDKITE_AGENT_META_DATA_QUEUE:-default}"
+    env:
+      DOCKER_IMAGE_TAG: "$BUILDKITE_BUILD_NUMBER"
+    command:
+      - 'make proto'
+      - 'git diff-index --quiet HEAD'
