@@ -109,5 +109,6 @@ steps:
     env:
       DOCKER_IMAGE_TAG: "$BUILDKITE_BUILD_NUMBER"
     command:
-      - 'make proto'
-      - 'git diff-index HEAD'
+      - 'make proto 2>&1 >> proto/log  && git diff-index -p HEAD 2>&1 >> proto/log'
+    artifact_paths:
+      - "proto/log"
