@@ -1276,3 +1276,14 @@ func (s *service) monitorVMExit() {
 		s.logger.WithError(publishErr).Error("failed to publish stop VM event")
 	}
 }
+
+func (s *service) CheckVMMConnection(requestCtx context.Context, req *proto.CheckVMMConnectionRequest) (*proto.CheckVMMConnectionResponse, error) {
+	type filler struct{}
+	f := filler{}
+	err := s.machine.GetMetadata(requestCtx, f)
+	if err != nil {
+		return nil, err
+	}
+
+	return &proto.CheckVMMConnectionResponse{}, nil
+}

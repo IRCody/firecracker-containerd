@@ -104,3 +104,8 @@ message JailerConfig {
     uint32 GID = 5;
 }
 
+message CheckVMMConnectionRequest {
+    string VMID = 1;
+}
+
+message CheckVMMConnectionResponse {}

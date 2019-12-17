@@ -312,6 +312,21 @@ func (s *local) GetVMMetadata(requestCtx context.Context, req *proto.GetVMMetada
 	return resp, nil
 }
 
+func (s *local) CheckVMMConnection(requestCtx context.Context, req *proto.CheckVMMConnectionRequest) (*proto.CheckVMMConnectionResponse, error) {
+	client, err := s.shimFirecrackerClient(requestCtx, req.VMID)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	resp, err := client.CheckVMMConnection(requestCtx, req)
+	if err != nil {
+		err = errors.Wrap(err, "shim client failed to ping")
+		s.logger.WithError(err).Error()
+		return nil, err
+	}
+	return resp, nil
+}
+
 func (s *local) newShim(ns, vmID, containerdAddress string, shimSocket *net.UnixListener, fcSocket *net.UnixListener) (*exec.Cmd, error) {
 	logger := s.logger.WithField("vmID", vmID)
 

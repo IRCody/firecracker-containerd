@@ -96,3 +96,8 @@ func (s *service) GetVMMetadata(ctx context.Context, req *proto.GetVMMetadataReq
 	log.G(ctx).Debugf("get vm metadata: %+v", req)
 	return s.local.GetVMMetadata(ctx, req)
 }
+
+func (s *service) CheckVMMConnection(ctx context.Context, req *proto.CheckVMMConnectionRequest) (*proto.CheckVMMConnectionResponse, error) {
+	log.G(ctx).Debugf("check vm connection: %+v", req)
+	return s.local.CheckVMMConnection(ctx, req)
+}

@@ -24,4 +24,7 @@ service Firecracker {
 
     // Get Vm's instance metadata
     rpc GetVMMetadata(GetVMMetadataRequest) returns (GetVMMetadataResponse);
+
+    // Check that VMM connection works
+    rpc CheckVMMConnection(CheckVMMConnectionRequest) returns (CheckVMMConnectionResponse);
 }
