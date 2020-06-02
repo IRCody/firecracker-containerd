@@ -1862,3 +1862,76 @@ func TestCreateVM_Isolated(t *testing.T) {
 		})
 	}
 }
+
+func TestOOMEvent_Isolated(t *testing.T) {
+	prepareIntegTest(t)
+	require := require.New(t)
+
+	client, err := containerd.New(containerdSockPath, containerd.WithDefaultRuntime(firecrackerRuntime))
+	require.NoError(err, "unable to create client to containerd service at %s, is containerd running?", containerdSockPath)
+	defer client.Close()
+
+	ctx := namespaces.WithNamespace(context.Background(), "default")
+
+	// If we don't have enough events within 30 seconds, the context will be cancelled and the loop below will be interrupted
+	subscribeCtx, subscribeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer subscribeCancel()
+	eventCh, errCh := client.Subscribe(subscribeCtx, "topic")
+
+	image, err := alpineImage(ctx, client, defaultSnapshotterName)
+	require.NoError(err, "failed to get alpine image")
+
+	pluginClient, err := ttrpcutil.NewClient(containerdSockPath + ".ttrpc")
+	require.NoError(err, "failed to create ttrpc client")
+
+	vmID := testNameToVMID(t.Name())
+
+	fcClient := fccontrol.NewFirecrackerClient(pluginClient.Client())
+	_, err = fcClient.CreateVM(ctx, &proto.CreateVMRequest{VMID: vmID})
+	require.NoError(err)
+
+	c, err := client.NewContainer(ctx,
+		"container-"+vmID,
+		containerd.WithSnapshotter(defaultSnapshotterName),
+		containerd.WithNewSnapshot("snapshot-"+vmID, image),
+		containerd.WithNewSpec(
+			oci.WithProcessArgs("sh", "-c", "'VAR=$(seq 1 100000000"),
+			firecrackeroci.WithVMID(vmID),
+			oci.WithMemoryLimit(1024*1024*20),
+		),
+	)
+	require.NoError(err)
+
+	stdout := startAndWaitTask(ctx, t, c)
+	fmt.Println(stdout)
+
+	_, err = fcClient.StopVM(ctx, &proto.StopVMRequest{VMID: vmID})
+	require.Equal(status.Code(err), codes.OK)
+
+	expected := []string{
+		"/snapshot/prepare",
+		"/snapshot/commit",
+		"/firecracker-vm/start",
+		"/snapshot/prepare",
+		"/containers/create",
+		"/tasks/create",
+		"/tasks/start",
+		"/tasks/exit",
+		"/tasks/delete",
+		"/firecracker-vm/stop",
+	}
+	var actual []string
+
+loop:
+	for len(actual) < len(expected) {
+		select {
+		case event := <-eventCh:
+			fmt.Println(event)
+			actual = append(actual, event.Topic)
+		case err := <-errCh:
+			assert.NoError(t, err)
+			break loop
+		}
+	}
+	require.Equal(expected, actual)
+}

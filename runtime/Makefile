@@ -48,14 +48,13 @@ test:
 	go test ./... $(EXTRAGOARGS)
 
 integ-test:
-	$(MAKE) $(addprefix integ-test-,$(INTEG_TESTNAMES))
+	$(MAKE) $(addprefix integ-test-,TestOOMEvent_Isolated)
 
 integ-test-%: logs
 	$(CURDIR)/../tools/thinpool.sh reset "$(FICD_DM_POOL)"
 	docker run --rm -it \
 		--privileged \
 		--ipc=host \
-		--network=none \
 		--volume /dev:/dev \
 		--volume /run/udev/control:/run/udev/control \
 		--volume $(CURDIR)/logs:/var/log/firecracker-containerd-test \
