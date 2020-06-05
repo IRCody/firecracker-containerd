@@ -48,7 +48,7 @@ test:
 	go test ./... $(EXTRAGOARGS)
 
 integ-test:
-	$(MAKE) $(addprefix integ-test-,TestOOMEvent_Isolated)
+	$(MAKE) $(addprefix integ-test-,TestEvents_Isolated)
 
 integ-test-%: logs
 	$(CURDIR)/../tools/thinpool.sh reset "$(FICD_DM_POOL)"
@@ -69,7 +69,7 @@ integ-test-%: logs
 		--workdir="/src/runtime" \
 		--init \
 		$(FIRECRACKER_CONTAINERD_TEST_IMAGE):$(DOCKER_IMAGE_TAG) \
-		"go test $(EXTRAGOARGS) -run '^$(subst integ-test-,,$@)$$'"
+		"go test $(EXTRAGOARGS) -timeout 42h -run '^$(subst integ-test-,,$@)$$'"
 
 benchmark-%: logs
 	$(CURDIR)/../tools/thinpool.sh reset "$(FICD_DM_POOL)"

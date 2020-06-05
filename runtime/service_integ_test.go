@@ -101,12 +101,86 @@ func unpackImage(ctx context.Context, client *containerd.Client, snapshotterName
 	return img, nil
 }
 
+func oomImage(ctx context.Context, client *containerd.Client, snapshotterName string) (containerd.Image, error) {
+	return unpackImage(ctx, client, snapshotterName, "docker.io/gisleburt/my-memory-hog:latest")
+}
+
 func alpineImage(ctx context.Context, client *containerd.Client, snapshotterName string) (containerd.Image, error) {
 	return unpackImage(ctx, client, snapshotterName, "docker.io/library/alpine:3.10.1")
 }
 
 func iperf3Image(ctx context.Context, client *containerd.Client, snapshotterName string) (containerd.Image, error) {
 	return unpackImage(ctx, client, snapshotterName, "docker.io/mlabbe/iperf3:3.6-r0")
+}
+
+func TestShimSendsOOMEvent(t *testing.T) {
+	prepareIntegTest(t)
+
+	ctx := namespaces.WithNamespace(context.Background(), defaultNamespace)
+
+	client, err := containerd.New(containerdSockPath)
+	require.NoError(t, err, "unable to create client to containerd service at %s, is containerd running?", containerdSockPath)
+	defer client.Close()
+
+	//	image, err := alpineImage(ctx, client, defaultSnapshotterName)
+	image, err := oomImage(ctx, client, defaultSnapshotterName)
+	require.NoError(t, err, "failed to get alpine image")
+
+	testTimeout := 100 * time.Second
+	testCtx, testCancel := context.WithTimeout(ctx, testTimeout)
+	defer testCancel()
+
+	containerName := fmt.Sprintf("%s-%d", t.Name(), time.Now().UnixNano())
+	snapshotName := fmt.Sprintf("%s-snapshot", containerName)
+	container, err := client.NewContainer(testCtx,
+		containerName,
+		containerd.WithRuntime(firecrackerRuntime, nil),
+		containerd.WithSnapshotter(defaultSnapshotterName),
+		containerd.WithNewSnapshot(snapshotName, image),
+		containerd.WithNewSpec(
+			oci.WithProcessArgs("/usr/bin/php", "swallow-memory.php"),
+			oci.WithMemoryLimit(20*1024*1024),
+		),
+	)
+	require.NoError(t, err, "failed to create container %s", containerName)
+
+	task, err := container.NewTask(testCtx, cio.NewCreator(cio.WithStdio))
+	require.NoError(t, err, "failed to create task for container %s", containerName)
+
+	oomEventCh, oomEventErrCh := client.Subscribe(testCtx, "topic") //fmt.Sprintf(`topic`, runtime.TaskOOMEventTopic))
+
+	err = task.Start(testCtx)
+	require.NoError(t, err, "failed to start task for container %s", containerName)
+
+	shimProcesses, err := internal.WaitForProcessToExist(testCtx, time.Second, findShim)
+	require.NoError(t, err, "failed waiting for expected shim process %q to come up", shimProcessName)
+	require.Len(t, shimProcesses, 1, "expected only one shim process to exist")
+	shimProcess := shimProcesses[0]
+	fmt.Println(shimProcess, "entering select")
+loop:
+	select {
+	case envelope := <-oomEventCh:
+		unmarshaledEvent, err := typeurl.UnmarshalAny(envelope.Event)
+		require.NoError(t, err, "failed to unmarshal event")
+
+		switch event := unmarshaledEvent.(type) {
+		case *events.TaskOOM:
+			require.Equal(t, container.ID(), event.ContainerID, "received oom event from expected container %s", container.ID())
+		default:
+			fmt.Println("received non-oom event: ", event)
+			//			require.Fail(t, "unexpected event type", "received unexpected non-exit event type on topic: %s", envelope.Topic)
+			goto loop
+		}
+
+		err = internal.WaitForPidToExit(testCtx, time.Second, shimProcess.Pid)
+		require.NoError(t, err, "failed waiting for shim process \"%s\" to exit", shimProcessName)
+
+	case err = <-oomEventErrCh:
+		require.Fail(t, "unexpected error", "unexpectedly received on task exit error channel: %s", err.Error())
+	case <-testCtx.Done():
+		require.Fail(t, "context canceled", "context canceled while waiting for container \"%s\" exit: %s", containerName, testCtx.Err())
+	}
+
 }
 
 func TestShimExitsUponContainerDelete_Isolated(t *testing.T) {
@@ -1721,11 +1795,12 @@ func TestEvents_Isolated(t *testing.T) {
 	ctx := namespaces.WithNamespace(context.Background(), "default")
 
 	// If we don't have enough events within 30 seconds, the context will be cancelled and the loop below will be interrupted
-	subscribeCtx, subscribeCancel := context.WithTimeout(ctx, 30*time.Second)
+	subscribeCtx, subscribeCancel := context.WithTimeout(ctx, 60*time.Second)
 	defer subscribeCancel()
 	eventCh, errCh := client.Subscribe(subscribeCtx, "topic")
 
-	image, err := alpineImage(ctx, client, defaultSnapshotterName)
+	//	image, err := alpineImage(ctx, client, defaultSnapshotterName)
+	image, err := oomImage(ctx, client, defaultSnapshotterName)
 	require.NoError(err, "failed to get alpine image")
 
 	pluginClient, err := ttrpcutil.NewClient(containerdSockPath + ".ttrpc")
@@ -1741,13 +1816,19 @@ func TestEvents_Isolated(t *testing.T) {
 		"container-"+vmID,
 		containerd.WithSnapshotter(defaultSnapshotterName),
 		containerd.WithNewSnapshot("snapshot-"+vmID, image),
-		containerd.WithNewSpec(oci.WithProcessArgs("/bin/echo", "-n", "hello"), firecrackeroci.WithVMID(vmID)),
+		containerd.WithNewSpec(
+			firecrackeroci.WithVMID(vmID),
+			oci.WithProcessArgs("/usr/bin/php", "swallow-memory.php"),
+			oci.WithMemoryLimit(20*1024*1024),
+			oci.WithMemorySwap(0),
+		),
 	)
 	require.NoError(err)
-
+	fmt.Println("Starting and waiting")
 	stdout := startAndWaitTask(ctx, t, c)
-	require.Equal("hello", stdout)
-
+	//	require.Equal("hello", stdout)
+	fmt.Println("stdout:", stdout)
+	fmt.Println("Stopping vm")
 	_, err = fcClient.StopVM(ctx, &proto.StopVMRequest{VMID: vmID})
 	require.Equal(status.Code(err), codes.OK)
 
@@ -1759,6 +1840,7 @@ func TestEvents_Isolated(t *testing.T) {
 		"/containers/create",
 		"/tasks/create",
 		"/tasks/start",
+		"/tasks/oom",
 		"/tasks/exit",
 		"/tasks/delete",
 		"/firecracker-vm/stop",
@@ -1769,6 +1851,7 @@ loop:
 	for len(actual) < len(expected) {
 		select {
 		case event := <-eventCh:
+			fmt.Println(event.Topic)
 			actual = append(actual, event.Topic)
 		case err := <-errCh:
 			assert.NoError(t, err)
@@ -1861,77 +1944,4 @@ func TestCreateVM_Isolated(t *testing.T) {
 			require.Equal(t, status.Code(err), codes.OK)
 		})
 	}
-}
-
-func TestOOMEvent_Isolated(t *testing.T) {
-	prepareIntegTest(t)
-	require := require.New(t)
-
-	client, err := containerd.New(containerdSockPath, containerd.WithDefaultRuntime(firecrackerRuntime))
-	require.NoError(err, "unable to create client to containerd service at %s, is containerd running?", containerdSockPath)
-	defer client.Close()
-
-	ctx := namespaces.WithNamespace(context.Background(), "default")
-
-	// If we don't have enough events within 30 seconds, the context will be cancelled and the loop below will be interrupted
-	subscribeCtx, subscribeCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer subscribeCancel()
-	eventCh, errCh := client.Subscribe(subscribeCtx, "topic")
-
-	image, err := alpineImage(ctx, client, defaultSnapshotterName)
-	require.NoError(err, "failed to get alpine image")
-
-	pluginClient, err := ttrpcutil.NewClient(containerdSockPath + ".ttrpc")
-	require.NoError(err, "failed to create ttrpc client")
-
-	vmID := testNameToVMID(t.Name())
-
-	fcClient := fccontrol.NewFirecrackerClient(pluginClient.Client())
-	_, err = fcClient.CreateVM(ctx, &proto.CreateVMRequest{VMID: vmID})
-	require.NoError(err)
-
-	c, err := client.NewContainer(ctx,
-		"container-"+vmID,
-		containerd.WithSnapshotter(defaultSnapshotterName),
-		containerd.WithNewSnapshot("snapshot-"+vmID, image),
-		containerd.WithNewSpec(
-			oci.WithProcessArgs("/bin/sh", "-c", "'VAR=$(seq 1 100000000"),
-			firecrackeroci.WithVMID(vmID),
-			oci.WithMemoryLimit(1024*1024*20),
-		),
-	)
-	require.NoError(err)
-
-	stdout := startAndWaitTask(ctx, t, c)
-	fmt.Println(stdout)
-
-	_, err = fcClient.StopVM(ctx, &proto.StopVMRequest{VMID: vmID})
-	require.Equal(status.Code(err), codes.OK)
-
-	expected := []string{
-		"/snapshot/prepare",
-		"/snapshot/commit",
-		"/firecracker-vm/start",
-		"/snapshot/prepare",
-		"/containers/create",
-		"/tasks/create",
-		"/tasks/start",
-		"/tasks/exit",
-		"/tasks/delete",
-		"/firecracker-vm/stop",
-	}
-	var actual []string
-
-loop:
-	for len(actual) < len(expected) {
-		select {
-		case event := <-eventCh:
-			fmt.Println(event)
-			actual = append(actual, event.Topic)
-		case err := <-errCh:
-			assert.NoError(t, err)
-			break loop
-		}
-	}
-	require.Equal(expected, actual)
 }

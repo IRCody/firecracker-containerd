@@ -25,7 +25,6 @@ import (
 	"github.com/containerd/containerd/identifiers"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/pkg/oom"
 	runc "github.com/containerd/containerd/runtime/v2/runc/v2"
 	"github.com/containerd/containerd/runtime/v2/shim"
 	taskAPI "github.com/containerd/containerd/runtime/v2/task"
@@ -93,11 +92,20 @@ func NewTaskService(
 	shimCancel context.CancelFunc,
 	publisher shim.Publisher,
 ) (taskAPI.TaskService, error) {
-	ep, err := oom.New(publisher)
-	if err != nil {
-		return nil, err
-	}
-	go ep.Run(shimCtx)
+	/*	var (
+			ep  oom.Watcher
+			err error
+		)
+		if cgroups.Mode() == cgroups.Unified {
+			ep, err = oomv2.New(publisher)
+		} else {
+			ep, err = oomv1.New(publisher)
+		}
+		if err != nil {
+			return nil, err
+		}
+		go ep.Run(shimCtx)
+	*/
 	// We provide an empty string for "id" as the service manages multiple tasks; there is no single
 	// "id" being managed. As noted in the comments of the called code, the "id" arg is only used by
 	// the Cleanup function, so it will never be invoked as part of the task service API, which is all
