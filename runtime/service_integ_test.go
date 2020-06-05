@@ -1895,7 +1895,7 @@ func TestOOMEvent_Isolated(t *testing.T) {
 		containerd.WithSnapshotter(defaultSnapshotterName),
 		containerd.WithNewSnapshot("snapshot-"+vmID, image),
 		containerd.WithNewSpec(
-			oci.WithProcessArgs("sh", "-c", "'VAR=$(seq 1 100000000"),
+			oci.WithProcessArgs("/bin/sh", "-c", "'VAR=$(seq 1 100000000"),
 			firecrackeroci.WithVMID(vmID),
 			oci.WithMemoryLimit(1024*1024*20),
 		),
